@@ -1,7 +1,7 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import HTMLResponse
+from fastapi.middleware.cors import CORSMiddleware  
 from fpdf import FPDF
 import uuid
 import os
@@ -9,8 +9,6 @@ import logging
 import cv2
 import mediapipe as mp
 import numpy as np
-
-# Se asume que estos archivos están en el mismo directorio.
 from handsMesh import segmentar_manos
 from faceMesh import segmentar_rostro
 
@@ -101,6 +99,21 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = FastAPI()
+
+# ================== CONFIGURACIÓN DE CORS ==================
+# << 2. BLOQUE AÑADIDO PARA HABILITAR CORS
+origins = [
+    "*"  # Permite cualquier origen. Para producción más segura, cambia esto a la URL de tu Vercel app.
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+# ==========================================================
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
@@ -274,39 +287,77 @@ async def procesar_imagen_completa(file: UploadFile = File(...)):
 
         pdf = FPDF()
         
-        # Página 1: Segmentación visual de las 3 imágenes
+        # Página 1: Todas las imágenes en una sola página
         pdf.add_page()
         pdf.set_font("Arial", size=16)
         pdf.cell(200, 10, txt="Reporte de Segmentación y Análisis", ln=True, align='C')
-        pdf.ln(10)
+        pdf.ln(5)
         
-        y_position = 30
+        # Configuración de posiciones y tamaños
+        image_width = 90  # Ancho de cada imagen
+        image_height = 60  # Alto de cada imagen
+        start_x = 10
+        current_y = 25
         
+        # Contador de imágenes para organizar la disposición
+        images_added = 0
+        
+        # Rostro segmentado
         if rostro_success and os.path.exists(rostro_output_path):
-            pdf.set_font("Arial", size=12)
-            pdf.cell(200, 10, txt="Segmentación de Rostro:", ln=True, align='L')
-            pdf.ln(2)
-            pdf.image(rostro_output_path, x=10, y=y_position, w=90)
+            # Título para la imagen de rostro
+            pdf.set_font("Arial", style='B', size=10)
+            pdf.set_xy(start_x, current_y)
+            pdf.cell(image_width, 5, txt="Rostro Segmentado", ln=False, align='C')
+            
+            # Imagen de rostro
+            pdf.image(rostro_output_path, x=start_x, y=current_y + 5, w=image_width, h=image_height)
+            images_added += 1
+        
+        # Manos segmentadas (lado derecho si hay rostro, sino en la izquierda)
+        if manos_success and os.path.exists(manos_output_path):
+            x_pos = start_x + (image_width + 10) if images_added > 0 else start_x
+            y_pos = current_y if images_added > 0 else current_y
+            
+            # Si ya hay una imagen en la fila, poner al lado; si no, nueva fila
+            if images_added >= 2:
+                y_pos = current_y + image_height + 15
+                x_pos = start_x
+                images_added = 0
+            
+            # Título para la imagen de manos
+            pdf.set_font("Arial", style='B', size=10)
+            pdf.set_xy(x_pos, y_pos)
+            pdf.cell(image_width, 5, txt="Manos Segmentadas", ln=False, align='C')
+            
+            # Imagen de manos
+            pdf.image(manos_output_path, x=x_pos, y=y_pos + 5, w=image_width, h=image_height)
+            images_added += 1
+            
+            # Actualizar current_y para la siguiente imagen
+            if images_added == 1:
+                current_y = y_pos
+        
+        # Manos numeradas
+        if manos_success and os.path.exists(manos_numeros_output_path):
+            x_pos = start_x + (image_width + 10) if images_added == 1 else start_x
+            y_pos = current_y if images_added == 1 else current_y + image_height + 15
+            
+            # Título para la imagen de manos numeradas
+            pdf.set_font("Arial", style='B', size=10)
+            pdf.set_xy(x_pos, y_pos)
+            pdf.cell(image_width, 5, txt="Manos Numeradas", ln=False, align='C')
+            
+            # Imagen de manos numeradas
+            pdf.image(manos_numeros_output_path, x=x_pos, y=y_pos + 5, w=image_width, h=image_height)
 
-        if manos_success:
-            pdf.ln(60)
-            pdf.set_font("Arial", size=12)
-            pdf.cell(200, 10, txt="Segmentación de Manos:", ln=True, align='L')
-            pdf.ln(2)
-            pdf.image(manos_output_path, x=10, y=y_position + 70, w=90)
-            
-            pdf.ln(60)
-            pdf.set_font("Arial", size=12)
-            pdf.cell(200, 10, txt="Zonas de Manos Numeradas:", ln=True, align='L')
-            pdf.ln(2)
-            pdf.image(manos_numeros_output_path, x=10, y=y_position + 140, w=90)
-            
-        pdf.ln(150)
-        pdf.set_font("Arial", size=10)
+        # Página 2: Resumen de procesamiento
+        pdf.add_page()
+        pdf.set_font("Arial", size=12)
         pdf.cell(200, 10, txt=f"Rostro procesado: {'Sí' if rostro_success else 'No'}", ln=True, align='L')
         pdf.cell(200, 10, txt=f"Manos procesadas: {'Sí' if manos_success else 'No'}", ln=True, align='L')
+        pdf.ln(10)
 
-        # Página 2: Tablas de análisis
+        # Página 3: Tablas de análisis
         if intensidades_rostro or intensidades_manos:
             pdf.add_page()
             pdf.set_font("Arial", size=16)
@@ -334,9 +385,29 @@ async def procesar_imagen_completa(file: UploadFile = File(...)):
                 pdf.cell(90, 8, "Zona de la Mano", 1, 0, 'C')
                 pdf.cell(90, 8, "Intensidad Promedio", 1, 1, 'C')
                 pdf.set_font("Arial", size=10)
-                for zona, promedio in intensidades_manos.items():
-                    pdf.cell(90, 8, zona, 1, 0, 'L')
-                    pdf.cell(90, 8, promedio, 1, 1, 'C')
+                
+                # Dividir la tabla de manos en dos columnas si es muy larga
+                items = list(intensidades_manos.items())
+                mid_point = len(items) // 2 + len(items) % 2
+                col1 = items[:mid_point]
+                col2 = items[mid_point:]
+                
+                max_len = max(len(col1), len(col2))
+                
+                for i in range(max_len):
+                    if i < len(col1):
+                        zona1, prom1 = col1[i]
+                        pdf.cell(45, 8, zona1, 1, 0, 'L')
+                        pdf.cell(45, 8, str(prom1), 1, 0, 'C')
+                    else:
+                        pdf.cell(90, 8, "", 1, 0) # Celda vacía
+
+                    if i < len(col2):
+                        zona2, prom2 = col2[i]
+                        pdf.cell(45, 8, zona2, 1, 0, 'L')
+                        pdf.cell(45, 8, str(prom2), 1, 1, 'C')
+                    else:
+                        pdf.cell(90, 8, "", 1, 1) # Celda vacía
 
         pdf.output(pdf_path)
         
@@ -362,7 +433,7 @@ async def procesar_imagen_completa(file: UploadFile = File(...)):
 # ================== UTILIDADES ==================
 async def cleanup_files(*file_paths):
     import asyncio
-    await asyncio.sleep(2)
+    await asyncio.sleep(5) # Aumentar tiempo de espera
     for file_path in file_paths:
         try:
             if os.path.exists(file_path):
